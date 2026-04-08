@@ -159,6 +159,8 @@ sm90_fp8_gemm_1d2d_impl(float* sfb, int* grouped_layout,
         if (warp_idx == kNumMathThreads / 32 + 2 and cute::elect_one_sync()) {
             // Persistently schedule over blocks
             while (scheduler.get_next_block(m_block_idx, n_block_idx)) {
+                bool valid = scheduler.is_computation_valid(m_block_idx, 0);
+
                 // Assign TMA multicast number into A and B
                 // NOTES: there may be additional odd rows/columns or cases where multicast is not possible.
                 const bool is_tma_multicast_valid = scheduler.is_tma_multicast_valid(m_block_idx);
@@ -170,22 +172,27 @@ sm90_fp8_gemm_1d2d_impl(float* sfb, int* grouped_layout,
                     // Wait consumer release
                     empty_barriers[stage_idx]->wait(phase ^ 1);
 
-                    // Issue TMA A
-                    constexpr bool kWithGroupOffsetA = kGemmType == GemmType::MGroupedMasked;
                     auto& full_barrier = *full_barriers[stage_idx];
-                    const uint32_t k_idx = k_block_idx * BLOCK_K;
-                    tma_copy<BLOCK_K, BLOCK_M, kSwizzleAMode>(&tensor_map_a, &full_barrier,
-                             smem_a[stage_idx], k_idx, scheduler.get_global_idx<kWithGroupOffsetA>(shape_m, BLOCK_M, m_block_idx),
-                             num_tma_multicast_a);
-                    tma_copy<BLOCK_M, BLOCK_K, 0>(&tensor_map_sfa, &full_barrier,
-                             smem_sfa[stage_idx], m_block_idx * BLOCK_M, scheduler.get_global_idx<kWithGroupOffsetA>(shape_k_scales, 1, k_block_idx),
-                             num_tma_multicast_a);
 
-                    // Issue TMA B
-                    tma_copy<BLOCK_K, BLOCK_N, kSwizzleBMode>(&tensor_map_b, &full_barrier,
-                             smem_b[stage_idx], k_idx, scheduler.get_global_idx<true>(shape_n, BLOCK_N, n_block_idx, m_block_idx),
-                             num_tma_multicast_b);
-                    full_barrier.arrive_and_expect_tx(SMEM_A_SIZE_PER_STAGE + SMEM_B_SIZE_PER_STAGE + SMEM_SFA_SIZE_PER_STAGE);
+                    if (valid) {
+                        // Issue TMA A
+                        constexpr bool kWithGroupOffsetA = kGemmType == GemmType::MGroupedMasked;
+                        const uint32_t k_idx = k_block_idx * BLOCK_K;
+                        tma_copy<BLOCK_K, BLOCK_M, kSwizzleAMode>(&tensor_map_a, &full_barrier,
+                                 smem_a[stage_idx], k_idx, scheduler.get_global_idx<kWithGroupOffsetA>(shape_m, BLOCK_M, m_block_idx),
+                                 num_tma_multicast_a);
+                        tma_copy<BLOCK_M, BLOCK_K, 0>(&tensor_map_sfa, &full_barrier,
+                                 smem_sfa[stage_idx], m_block_idx * BLOCK_M, scheduler.get_global_idx<kWithGroupOffsetA>(shape_k_scales, 1, k_block_idx),
+                                 num_tma_multicast_a);
+
+                        // Issue TMA B
+                        tma_copy<BLOCK_K, BLOCK_N, kSwizzleBMode>(&tensor_map_b, &full_barrier,
+                                 smem_b[stage_idx], k_idx, scheduler.get_global_idx<true>(shape_n, BLOCK_N, n_block_idx, m_block_idx),
+                                 num_tma_multicast_b);
+                        full_barrier.arrive_and_expect_tx(SMEM_A_SIZE_PER_STAGE + SMEM_B_SIZE_PER_STAGE + SMEM_SFA_SIZE_PER_STAGE);
+                    } else {
+                        full_barrier.arrive_and_expect_tx(0);
+                    }
                 }
             }
 
