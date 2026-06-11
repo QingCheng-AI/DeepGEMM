@@ -11,6 +11,7 @@
 
 #include "epilogue.hpp"
 #include "runtime_utils.hpp"
+#include "../warmup.hpp"
 
 namespace deep_gemm {
 
@@ -88,6 +89,29 @@ static void sm90_fp8_gemm_1d2d(const torch::Tensor& a, const torch::Tensor& sfa,
     DG_HOST_ASSERT(major_a == cute::UMMA::Major::K and major_b == cute::UMMA::Major::K);
 
     const auto& aligned_k = align(k, 128);
+    // Pre-compile every kernel selected for `m` in [1, DG_WARMUP_MAX_M].
+    maybe_warmup("sm90_fp8_gemm_1d2d", n, k, 1, compiled_dims, [&](const int& warmup_m) {
+        const auto& warmup_config = get_best_config<SM90ArchSpec>(
+            GemmType::Normal, KernelType::Kernel1D2D,
+            warmup_m, n, k, 1, major_a, major_b,
+            torch::kFloat8_e4m3fn, d.scalar_type(), c.has_value(),
+            device_runtime->get_num_sms());
+        const SM90FP8Gemm1D2DRuntime::Args& warmup_args = {
+            .major_sfb = major_sfb,
+            .m = warmup_m, .n = n, .k = aligned_k,
+            .num_groups = 1,
+            .compiled_dims = compiled_dims,
+            .epilogue_type = epilogue_type,
+            .gemm_config = warmup_config,
+            .launch_args = LaunchArgs(warmup_config.num_sms, warmup_config.thread_config.num_threads,
+                                      warmup_config.smem_config.smem_size,
+                                      warmup_config.multicast_config.num_multicast),
+            .sfb = nullptr,
+            .grouped_layout = nullptr,
+            .tensor_map_a = {}, .tensor_map_b = {}, .tensor_map_d = {}, .tensor_map_sfa = {},
+        };
+        return SM90FP8Gemm1D2DRuntime::generate(warmup_args);
+    });
     const auto& config = get_best_config<SM90ArchSpec>(
         GemmType::Normal, KernelType::Kernel1D2D,
         m, n, k, 1, major_a, major_b,
@@ -149,6 +173,32 @@ static void sm90_m_grouped_fp8_gemm_contiguous_1d2d(const torch::Tensor& a, cons
     DG_HOST_ASSERT(major_a == cute::UMMA::Major::K and major_b == cute::UMMA::Major::K);
 
     const auto& aligned_k = align(k, 128);
+    // Pre-compile every kernel selected for `m` in [1, DG_WARMUP_MAX_M]
+    // (here `m` is the total token count across all groups).
+    const std::optional<std::string> warmup_epilogue_type = std::nullopt;
+    maybe_warmup("sm90_m_grouped_fp8_gemm_contiguous_1d2d", n, k, num_groups, compiled_dims,
+                 [&](const int& warmup_m) {
+        const auto& warmup_config = get_best_config<SM90ArchSpec>(
+            GemmType::MGroupedContiguous, KernelType::Kernel1D2D,
+            warmup_m, n, k, 1, major_a, major_b,
+            torch::kFloat8_e4m3fn, d.scalar_type(), false,
+            device_runtime->get_num_sms());
+        const SM90FP8Gemm1D2DRuntime::Args& warmup_args = {
+            .major_sfb = major_sfb,
+            .m = warmup_m, .n = n, .k = aligned_k,
+            .num_groups = num_groups,
+            .compiled_dims = compiled_dims,
+            .epilogue_type = warmup_epilogue_type,
+            .gemm_config = warmup_config,
+            .launch_args = LaunchArgs(warmup_config.num_sms, warmup_config.thread_config.num_threads,
+                                      warmup_config.smem_config.smem_size,
+                                      warmup_config.multicast_config.num_multicast),
+            .sfb = nullptr,
+            .grouped_layout = nullptr,
+            .tensor_map_a = {}, .tensor_map_b = {}, .tensor_map_d = {}, .tensor_map_sfa = {},
+        };
+        return SM90FP8Gemm1D2DRuntime::generate(warmup_args);
+    });
     const auto& config = get_best_config<SM90ArchSpec>(
         GemmType::MGroupedContiguous, KernelType::Kernel1D2D,
         m, n, k, 1, major_a, major_b,
@@ -211,6 +261,32 @@ static void sm90_m_grouped_fp8_gemm_masked_1d2d(const torch::Tensor& a, const to
     DG_HOST_ASSERT(d.scalar_type() == torch::kBFloat16);
     DG_HOST_ASSERT(major_a == cute::UMMA::Major::K and major_b == cute::UMMA::Major::K);
 
+    // Pre-compile every kernel selected for `expected_m` in [1, DG_WARMUP_MAX_M].
+    // NOTES: masked GEMM picks its config from `expected_m`, not `m`.
+    const std::optional<std::string> warmup_epilogue_type = std::nullopt;
+    maybe_warmup("sm90_fp8_m_grouped_gemm_masked_1d2d", n, k, num_groups, compiled_dims,
+                 [&](const int& warmup_expected_m) {
+        const auto& warmup_config = get_best_config<SM90ArchSpec>(
+            GemmType::MGroupedMasked, KernelType::Kernel1D2D,
+            warmup_expected_m, n, k, num_groups, major_a, major_b,
+            torch::kFloat8_e4m3fn, d.scalar_type(), false,
+            device_runtime->get_num_sms());
+        const SM90FP8Gemm1D2DRuntime::Args& warmup_args = {
+            .major_sfb = major_sfb,
+            .m = m, .n = n, .k = aligned_k,
+            .num_groups = num_groups,
+            .compiled_dims = compiled_dims,
+            .epilogue_type = warmup_epilogue_type,
+            .gemm_config = warmup_config,
+            .launch_args = LaunchArgs(warmup_config.num_sms, warmup_config.thread_config.num_threads,
+                                      warmup_config.smem_config.smem_size,
+                                      warmup_config.multicast_config.num_multicast),
+            .sfb = nullptr,
+            .grouped_layout = nullptr,
+            .tensor_map_a = {}, .tensor_map_b = {}, .tensor_map_d = {}, .tensor_map_sfa = {},
+        };
+        return SM90FP8Gemm1D2DRuntime::generate(warmup_args);
+    });
     const auto& config = get_best_config<SM90ArchSpec>(
         GemmType::MGroupedMasked, KernelType::Kernel1D2D,
         expected_m, n, k, num_groups, major_a, major_b,

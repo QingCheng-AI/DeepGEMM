@@ -10,6 +10,7 @@
 #include "../../utils/math.hpp"
 #include "../heuristics/sm100.hpp"
 #include "runtime_utils.hpp"
+#include "../warmup.hpp"
 
 namespace deep_gemm {
 
@@ -80,6 +81,26 @@ static void sm100_bf16_gemm(const torch::Tensor& a,
                             const cute::UMMA::Major& major_a, const cute::UMMA::Major& major_b,
                             const std::string& compiled_dims) {
     const auto& aligned_k = align(k, 64);
+    // Pre-compile every kernel selected for `m` in [1, DG_WARMUP_MAX_M].
+    maybe_warmup("sm100_bf16_gemm", n, k, 1, compiled_dims, [&](const int& warmup_m) {
+        const auto& warmup_config = get_best_config<SM100ArchSpec>(
+            GemmType::Normal, KernelType::KernelNoSF,
+            warmup_m, n, k, 1, major_a, major_b,
+            torch::kBFloat16, d.scalar_type(), c.has_value(),
+            device_runtime->get_num_sms());
+        const SM100BF16GemmRuntime::Args& warmup_args = {
+            .m = warmup_m, .n = n, .k = aligned_k,
+            .num_groups = 1,
+            .compiled_dims = compiled_dims,
+            .gemm_config = warmup_config,
+            .launch_args = LaunchArgs(warmup_config.num_sms, warmup_config.thread_config.num_threads,
+                                      warmup_config.smem_config.smem_size,
+                                      warmup_config.multicast_config.num_multicast),
+            .grouped_layout = nullptr,
+            .tensor_map_a = {}, .tensor_map_b = {}, .tensor_map_cd = {},
+        };
+        return SM100BF16GemmRuntime::generate(warmup_args);
+    });
     const auto& config = get_best_config<SM100ArchSpec>(
         GemmType::Normal, KernelType::KernelNoSF,
         m, n, k, 1, major_a, major_b,
@@ -129,6 +150,28 @@ static void sm100_m_grouped_bf16_gemm_contiguous(const torch::Tensor& a,
                                                  const cute::UMMA::Major& major_a, const cute::UMMA::Major& major_b,
                                                  const std::string& compiled_dims) {
     const auto& aligned_k = align(k, 64);
+    // Pre-compile every kernel selected for `m` in [1, DG_WARMUP_MAX_M]
+    // (here `m` is the total token count across all groups).
+    maybe_warmup("sm100_bf16_m_grouped_gemm_contiguous", n, k, num_groups, compiled_dims,
+                 [&](const int& warmup_m) {
+        const auto& warmup_config = get_best_config<SM100ArchSpec>(
+            GemmType::MGroupedContiguous, KernelType::KernelNoSF,
+            warmup_m, n, k, 1, major_a, major_b,
+            torch::kBFloat16, d.scalar_type(), false,
+            device_runtime->get_num_sms());
+        const SM100BF16GemmRuntime::Args& warmup_args = {
+            .m = warmup_m, .n = n, .k = aligned_k,
+            .num_groups = num_groups,
+            .compiled_dims = compiled_dims,
+            .gemm_config = warmup_config,
+            .launch_args = LaunchArgs(warmup_config.num_sms, warmup_config.thread_config.num_threads,
+                                      warmup_config.smem_config.smem_size,
+                                      warmup_config.multicast_config.num_multicast),
+            .grouped_layout = nullptr,
+            .tensor_map_a = {}, .tensor_map_b = {}, .tensor_map_cd = {},
+        };
+        return SM100BF16GemmRuntime::generate(warmup_args);
+    });
     const auto& config = get_best_config<SM100ArchSpec>(
         GemmType::MGroupedContiguous, KernelType::KernelNoSF,
         // NOTES: `num_groups` is 1, since the contiguous layout is seen as a whole
@@ -180,6 +223,28 @@ static void sm100_m_grouped_bf16_gemm_masked(const torch::Tensor& a,
                                              const cute::UMMA::Major& major_a, const cute::UMMA::Major& major_b,
                                              const std::string& compiled_dims) {
     const auto& aligned_k = align(k, 64);
+    // Pre-compile every kernel selected for `expected_m` in [1, DG_WARMUP_MAX_M].
+    // NOTES: masked GEMM picks its config from `expected_m`, not `m`.
+    maybe_warmup("sm100_bf16_m_grouped_gemm_masked", n, k, num_groups, compiled_dims,
+                 [&](const int& warmup_expected_m) {
+        const auto& warmup_config = get_best_config<SM100ArchSpec>(
+            GemmType::MGroupedMasked, KernelType::KernelNoSF,
+            warmup_expected_m, n, k, num_groups, major_a, major_b,
+            torch::kBFloat16, d.scalar_type(), false,
+            device_runtime->get_num_sms());
+        const SM100BF16GemmRuntime::Args& warmup_args = {
+            .m = m, .n = n, .k = aligned_k,
+            .num_groups = num_groups,
+            .compiled_dims = compiled_dims,
+            .gemm_config = warmup_config,
+            .launch_args = LaunchArgs(warmup_config.num_sms, warmup_config.thread_config.num_threads,
+                                      warmup_config.smem_config.smem_size,
+                                      warmup_config.multicast_config.num_multicast),
+            .grouped_layout = nullptr,
+            .tensor_map_a = {}, .tensor_map_b = {}, .tensor_map_cd = {},
+        };
+        return SM100BF16GemmRuntime::generate(warmup_args);
+    });
     const auto& config = get_best_config<SM100ArchSpec>(
         GemmType::MGroupedMasked, KernelType::KernelNoSF,
         expected_m, n, k, num_groups, major_a, major_b,
