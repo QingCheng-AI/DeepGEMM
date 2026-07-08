@@ -374,7 +374,7 @@ void sm100_fp8_mqa_logits(const uint32_t seq_len, const uint32_t seq_len_kv,
                     // NOTES: we have redundant writes here, consider more carefully
                     const uint32_t& q_idx = block_q_idx * BLOCK_Q + i;
                     if constexpr (kIsCompressedLogits) {
-                        if (kv_offset + v_offset >= seq_k_start[i])
+                        if (kv_offset + v_offset >= seq_k_start[i] && kv_offset + v_offset < seq_k_start[i] + max_seqlen_k)
                             logits[q_idx * stride_logits + kv_offset + v_offset - seq_k_start[i]] = result;
                     } else {
                         logits[q_idx * stride_logits + kv_offset + v_offset] = result;
